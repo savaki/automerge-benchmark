@@ -82,7 +82,7 @@ func TestPerformance(t *testing.T) {
 
 	fmt.Println("applying edits ...")
 
-	node := automerge.NewNode(encoding.RawTypeVarInt)
+	node := automerge.NewObject(encoding.RawTypeVarInt)
 
 	actor := []byte("abc")
 	begin := time.Now()
