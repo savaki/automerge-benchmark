@@ -17,6 +17,7 @@ package automerge_benchmark
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"testing"
 	"time"
@@ -82,7 +83,7 @@ func TestPerformance(t *testing.T) {
 
 	fmt.Println("applying edits ...")
 
-	node := automerge.NewObject(encoding.RawTypeVarInt)
+	obj := automerge.NewObject(encoding.RawTypeVarInt)
 
 	actor := []byte("abc")
 	begin := time.Now()
@@ -97,14 +98,14 @@ func TestPerformance(t *testing.T) {
 					ref = nil
 				}
 				op := automerge.Op{
-					OpCounter:  counter,
-					OpActor:    actor,
+					Counter:    counter,
+					Actor:      actor,
 					RefCounter: counter - 1,
 					RefActor:   ref,
 					Type:       edit.OpType,
 					Value:      encoding.RuneValue(r),
 				}
-				err := node.Insert(op)
+				err := obj.Insert(op)
 				if err != nil {
 					t.Fatalf("got %v; want nil", err)
 				}
@@ -113,14 +114,14 @@ func TestPerformance(t *testing.T) {
 
 		case 1: // delete
 			op := automerge.Op{
-				OpCounter:  counter,
-				OpActor:    actor,
+				Counter:    counter,
+				Actor:      actor,
 				RefCounter: counter - 1,
 				RefActor:   actor,
 				Type:       edit.OpType,
 				Value:      encoding.RuneValue('_'),
 			}
-			err := node.Insert(op)
+			err := obj.Insert(op)
 			assert.Nil(t, err)
 
 		default:
@@ -130,11 +131,28 @@ func TestPerformance(t *testing.T) {
 		if row := i + 1; row%tick == 0 {
 			now := time.Now()
 			elapsed := float64(now.Sub(begin) / time.Microsecond)
-			fmt.Printf("%6d: %6d bytes, %3.1f µs/op\n", row, node.Size(), elapsed/tick)
+			fmt.Printf("%6d: %6d bytes, %3.1f µs/op\n", row, obj.Size(), elapsed/tick)
 			begin = now
 		}
 	}
 	fmt.Println()
 	fmt.Println("edits ->", len(edits))
-	fmt.Println("bytes ->", node.Size())
+	fmt.Println("bytes ->", obj.Size())
+
+	// text assembling via next
+	runes := make([]rune, 0, len(edits))
+	begin = time.Now()
+	var token automerge.ValueToken
+	for {
+		token, err = obj.NextValue(token)
+		if err == io.EOF {
+			break
+		}
+		assert.Nil(t, err)
+		runes = append(runes, rune(token.Value.Int))
+	}
+	elapsed := time.Now().Sub(begin).Round(time.Millisecond)
+
+	fmt.Printf("assembled %v edits via Next in %v\n", len(edits), elapsed)
+	//fmt.Println(string(runes))
 }
