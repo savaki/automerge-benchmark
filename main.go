@@ -17,13 +17,37 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/savaki/automerge/encoding"
 	"io/ioutil"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/savaki/automerge"
-	"github.com/savaki/automerge/encoding"
+	"github.com/urfave/cli"
 )
+
+var opts struct {
+	file string
+}
+
+func main() {
+	app := cli.NewApp()
+	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:        "file",
+			Usage:       "data file",
+			Value:       "testdata/sample.json",
+			Destination: &opts.file,
+		},
+	}
+	app.Action = apply
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
 
 type Edit struct {
 	Pos    int64 // Pos to insert or update at
@@ -70,97 +94,141 @@ func (e *Edit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func assertNil(err error, format string, args ...interface{}) {
+const tick = 25e3
+
+func benchmark(callback func() (*automerge.Object, error)) error {
+	var obj *automerge.Object
+	var err error
+	defer func(begin time.Time) {
+		fmt.Println()
+		fmt.Println("edits:   ", obj.RowCount())
+		fmt.Println("bytes:   ", obj.Size())
+		fmt.Println("elapsed: ", time.Now().Sub(begin).Round(time.Millisecond))
+		fmt.Println()
+
+	}(time.Now())
+
+	obj, err = callback()
+	return err
+}
+
+func apply(_ *cli.Context) error {
+	data, err := ioutil.ReadFile(opts.file)
 	if err != nil {
-		log.Fatalf(format, args)
+		return fmt.Errorf("unable to benchmark file, %v: %w", opts.file, err)
+	}
+
+	fmt.Println()
+	fmt.Printf("applying %v (%v bytes)\n", opts.file, len(data))
+
+	switch ext := filepath.Ext(opts.file); ext {
+	case ".json":
+		return applyJSON(data)
+
+	default:
+		return applyText(data)
 	}
 }
 
-func assertEqual(got, want int) {
-	if got != want {
-		log.Fatalf("got %v; want %v", got, want)
-	}
-}
-
-func main() {
-	data, err := ioutil.ReadFile("testdata/sample.json")
-	assertNil(err, "got %v; want nil", err)
-
+func applyJSON(data []byte) error {
 	var edits []Edit
-	err = json.Unmarshal(data, &edits)
-	assertNil(err, "", nil)
-	assertEqual(259778, len(edits))
+	if err := json.Unmarshal(data, &edits); err != nil {
+		return fmt.Errorf("unable to unmarshal edits: %w", err)
+	}
 
-	fmt.Println("applying edits ...")
-	//defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
+	return benchmark(func() (*automerge.Object, error) {
+		var (
+			obj     = automerge.NewObject(encoding.RawTypeVarInt)
+			actor   = []byte("abc")
+			begin   = time.Now()
+			counter = int64(1)
+		)
 
-	obj := automerge.NewObject(encoding.RawTypeVarInt)
-
-	actor := []byte("abc")
-	start := time.Now()
-	begin := start
-	const tick = 25e3
-	counter := int64(1)
-	for i, edit := range edits {
-		switch edit.OpType {
-		case 0: // insert
-			for _, r := range edit.Value {
-				ref := actor
-				if counter == 1 {
-					ref = nil
+		for i, edit := range edits {
+			switch edit.OpType {
+			case 0: // insert
+				for _, r := range edit.Value {
+					ref := actor
+					if counter == 1 {
+						ref = nil
+					}
+					op := automerge.Op{
+						ID:    automerge.NewID(counter, actor),
+						Ref:   automerge.NewID(counter-1, ref),
+						Type:  edit.OpType,
+						Value: encoding.RuneValue(r),
+					}
+					if err := obj.Insert(op); err != nil {
+						return nil, err
+					}
+					counter++
 				}
+
+			case 1: // delete
 				op := automerge.Op{
 					ID:    automerge.NewID(counter, actor),
-					Ref:   automerge.NewID(counter-1, ref),
+					Ref:   automerge.NewID(counter-1, actor),
 					Type:  edit.OpType,
-					Value: encoding.RuneValue(r),
+					Value: encoding.RuneValue('_'),
 				}
-				err := obj.Insert(op)
-				assertNil(err, "got %v; want nil", err)
-				counter++
+				if err := obj.Insert(op); err != nil {
+					return nil, err
+				}
+
+			default:
+				return nil, fmt.Errorf("got unknown op type, %v", edit.OpType)
 			}
 
-		case 1: // delete
+			if row := i + 1; row%tick == 0 {
+				if row == tick {
+					fmt.Println()
+				}
+				now := time.Now()
+				elapsed := float64(now.Sub(begin) / time.Microsecond)
+				begin = now
+				fmt.Printf("%6d: %6d bytes, %3.1f µs/op\n", row, obj.Size(), elapsed/tick)
+			}
+		}
+
+		return obj, nil
+	})
+}
+
+func applyText(data []byte) error {
+	s := string(data)
+
+	return benchmark(func() (*automerge.Object, error) {
+		var (
+			obj     = automerge.NewObject(encoding.RawTypeVarInt)
+			actor   = []byte("abc")
+			begin   = time.Now()
+			counter = int64(1)
+		)
+
+		for i, r := range s {
+			ref := actor
+			if counter == 1 {
+				ref = nil
+			}
 			op := automerge.Op{
 				ID:    automerge.NewID(counter, actor),
-				Ref:   automerge.NewID(counter-1, actor),
-				Type:  edit.OpType,
-				Value: encoding.RuneValue('_'),
+				Ref:   automerge.NewID(counter-1, ref),
+				Type:  0,
+				Value: encoding.RuneValue(r),
 			}
-			err := obj.Insert(op)
-			assertNil(err, "got %v; want nil", err)
+			if err := obj.Insert(op); err != nil {
+				return nil, err
+			}
+			counter++
 
-		default:
-			panic(fmt.Errorf("got unknown op type, %v", edit.OpType))
+			if row := i + 1; row%tick == 0 {
+				now := time.Now()
+				elapsed := float64(now.Sub(begin) / time.Microsecond)
+				begin = now
+				fmt.Printf("%6d: %6d bytes, %3.1f µs/op\n", row, obj.Size(), elapsed/tick)
+			}
 		}
 
-		if row := i + 1; row%tick == 0 {
-			now := time.Now()
-			elapsed := float64(now.Sub(begin) / time.Microsecond)
-			fmt.Printf("%6d: %6d bytes, %3.1f µs/op\n", row, obj.Size(), elapsed/tick)
-			begin = now
-		}
-	}
-	fmt.Println()
-	fmt.Println("edits:   ", len(edits))
-	fmt.Println("bytes:   ", obj.Size())
-	fmt.Println("elapsed: ", time.Now().Sub(start).Round(time.Millisecond))
-	fmt.Println()
-
-	//// text assembling via next
-	//runes := make([]rune, 0, len(edits))
-	//begin = time.Now()
-	//var token automerge.ValueToken
-	//for {
-	//	token, err = obj.NextValue(token)
-	//	if err == io.EOF {
-	//		break
-	//	}
-	//	assertNil(err, "got %v; want nil", err)
-	//	runes = append(runes, rune(token.Value.Int))
-	//}
-	//elapsed := time.Now().Sub(begin).Round(time.Millisecond)
-	//
-	//fmt.Printf("assembled %v edits via Next in %v\n", len(edits), elapsed)
-	//fmt.Println(string(runes))
+		return obj, nil
+	})
 }
