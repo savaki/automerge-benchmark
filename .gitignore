@@ -7,3 +7,8 @@
 
 # ignore generated files
 #
+go.sum
+automerge-benchmark
+cpu.pdf
+cpu.pprof
+

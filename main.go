@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package automerge_benchmark
+package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"testing"
+	"log"
 	"time"
 
 	"github.com/savaki/automerge"
 	"github.com/savaki/automerge/encoding"
-	"github.com/tj/assert"
 )
 
 type Edit struct {
@@ -72,21 +70,35 @@ func (e *Edit) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func TestPerformance(t *testing.T) {
+func assertNil(err error, format string, args ...interface{}) {
+	if err != nil {
+		log.Fatalf(format, args)
+	}
+}
+
+func assertEqual(got, want int) {
+	if got != want {
+		log.Fatalf("got %v; want %v", got, want)
+	}
+}
+
+func main() {
 	data, err := ioutil.ReadFile("testdata/sample.json")
-	assert.Nil(t, err)
+	assertNil(err, "got %v; want nil", err)
 
 	var edits []Edit
 	err = json.Unmarshal(data, &edits)
-	assert.Nil(t, err)
-	assert.Len(t, edits, 259778)
+	assertNil(err, "", nil)
+	assertEqual(259778, len(edits))
 
 	fmt.Println("applying edits ...")
+	//defer profile.Start(profile.CPUProfile, profile.ProfilePath(".")).Stop()
 
 	obj := automerge.NewObject(encoding.RawTypeVarInt)
 
 	actor := []byte("abc")
-	begin := time.Now()
+	start := time.Now()
+	begin := start
 	const tick = 25e3
 	counter := int64(1)
 	for i, edit := range edits {
@@ -98,34 +110,28 @@ func TestPerformance(t *testing.T) {
 					ref = nil
 				}
 				op := automerge.Op{
-					Counter:    counter,
-					Actor:      actor,
-					RefCounter: counter - 1,
-					RefActor:   ref,
-					Type:       edit.OpType,
-					Value:      encoding.RuneValue(r),
+					ID:    automerge.NewID(counter, actor),
+					Ref:   automerge.NewID(counter-1, ref),
+					Type:  edit.OpType,
+					Value: encoding.RuneValue(r),
 				}
 				err := obj.Insert(op)
-				if err != nil {
-					t.Fatalf("got %v; want nil", err)
-				}
+				assertNil(err, "got %v; want nil", err)
 				counter++
 			}
 
 		case 1: // delete
 			op := automerge.Op{
-				Counter:    counter,
-				Actor:      actor,
-				RefCounter: counter - 1,
-				RefActor:   actor,
-				Type:       edit.OpType,
-				Value:      encoding.RuneValue('_'),
+				ID:    automerge.NewID(counter, actor),
+				Ref:   automerge.NewID(counter-1, actor),
+				Type:  edit.OpType,
+				Value: encoding.RuneValue('_'),
 			}
 			err := obj.Insert(op)
-			assert.Nil(t, err)
+			assertNil(err, "got %v; want nil", err)
 
 		default:
-			t.Fatalf("got unknown op type, %v", edit.OpType)
+			panic(fmt.Errorf("got unknown op type, %v", edit.OpType))
 		}
 
 		if row := i + 1; row%tick == 0 {
@@ -136,23 +142,25 @@ func TestPerformance(t *testing.T) {
 		}
 	}
 	fmt.Println()
-	fmt.Println("edits ->", len(edits))
-	fmt.Println("bytes ->", obj.Size())
+	fmt.Println("edits:   ", len(edits))
+	fmt.Println("bytes:   ", obj.Size())
+	fmt.Println("elapsed: ", time.Now().Sub(start).Round(time.Millisecond))
+	fmt.Println()
 
-	// text assembling via next
-	runes := make([]rune, 0, len(edits))
-	begin = time.Now()
-	var token automerge.ValueToken
-	for {
-		token, err = obj.NextValue(token)
-		if err == io.EOF {
-			break
-		}
-		assert.Nil(t, err)
-		runes = append(runes, rune(token.Value.Int))
-	}
-	elapsed := time.Now().Sub(begin).Round(time.Millisecond)
-
-	fmt.Printf("assembled %v edits via Next in %v\n", len(edits), elapsed)
+	//// text assembling via next
+	//runes := make([]rune, 0, len(edits))
+	//begin = time.Now()
+	//var token automerge.ValueToken
+	//for {
+	//	token, err = obj.NextValue(token)
+	//	if err == io.EOF {
+	//		break
+	//	}
+	//	assertNil(err, "got %v; want nil", err)
+	//	runes = append(runes, rune(token.Value.Int))
+	//}
+	//elapsed := time.Now().Sub(begin).Round(time.Millisecond)
+	//
+	//fmt.Printf("assembled %v edits via Next in %v\n", len(edits), elapsed)
 	//fmt.Println(string(runes))
 }
